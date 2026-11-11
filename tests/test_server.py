@@ -89,6 +89,41 @@ class Protocol(Case):
         self.assertFalse(r["written"])
 
 
+class LongCalls(Case):
+    def test_progress_is_reported_while_a_slow_call_is_working(self):
+        """A vendor tool can run for minutes; the client must see the call is alive."""
+        import io
+        import time
+
+        from ecuharness import mcp
+
+        real = mcp.Server.handle_line
+
+        def slow(self, text):
+            if "ecu_overview" in text:
+                time.sleep(0.4)
+            return real(self, text)
+
+        calls = [{"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                  "params": {"name": "ecu_overview", "arguments": {}, "_meta": {"progressToken": "tok-1"}}},
+                 {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                  "params": {"name": "ecu_overview", "arguments": {}}}]
+        inp = io.BytesIO("".join(json.dumps(c) + "\n" for c in calls).encode("utf-8"))
+        out = io.BytesIO()
+        mcp.Server.handle_line = slow
+        try:
+            mcp.serve(self.root, inp, out, tick=0.1)
+        finally:
+            mcp.Server.handle_line = real
+        msgs = [json.loads(ln) for ln in out.getvalue().decode("utf-8").splitlines()]
+        progress = [m for m in msgs if m.get("method") == "notifications/progress"]
+        self.assertGreaterEqual(len(progress), 2)
+        self.assertTrue(all(m["params"]["progressToken"] == "tok-1" for m in progress))
+        ids = [m.get("id") for m in msgs]
+        self.assertLess(max(i for i, m in enumerate(msgs) if m.get("method")), ids.index(2))   # none after call 1
+        self.assertEqual([m["id"] for m in msgs if "result" in m], [1, 2])
+
+
 def walk(schema, path="$"):
     yield path, schema
     for k, v in (schema.get("properties") or {}).items():

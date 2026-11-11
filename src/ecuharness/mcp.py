@@ -194,18 +194,57 @@ def _error(mid, code, message, data=None):
     return {"jsonrpc": "2.0", "id": mid, "error": err}
 
 
-def serve(root, inp=None, out=None):
-    """Run until stdin closes. Only protocol messages go to stdout."""
+def _progress_token(text):
+    """The progress token of a tools/call request, if the client sent one."""
+    if '"progressToken"' not in text:
+        return None
+    try:
+        msg = json.loads(text)
+        if msg.get("method") == "tools/call":
+            return (msg.get("params") or {}).get("_meta", {}).get("progressToken")
+    except (ValueError, AttributeError):
+        pass
+    return None
+
+
+def serve(root, inp=None, out=None, tick=10.0):
+    """Run until stdin closes. Only protocol messages go to stdout.
+
+    A vendor tool run can take minutes. When the client asked for progress on a
+    tool call, a short notification goes out every ``tick`` seconds while the
+    call is working, so the client can see it is alive and keep waiting."""
     inp = inp or sys.stdin.buffer
     out = out or sys.stdout.buffer
     server = Server(root)
+    wlock = threading.Lock()
+
+    def send(obj):
+        data = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n"
+        with wlock:
+            out.write(data)
+            out.flush()
+
     print("ecu-harness %s serving %s" % (__version__, server.root), file=sys.stderr, flush=True)
     server.warm_up()
     for raw in iter(inp.readline, b""):
         line = raw.strip()
         if not line:
             continue
-        resp = server.handle_line(line.decode("utf-8", "replace"))
+        text = line.decode("utf-8", "replace")
+        token = _progress_token(text)
+        done = threading.Event()
+        if token is not None:
+            def ticker(token=token, done=done):
+                n = 0
+                while not done.wait(tick):
+                    n += 1
+                    send({"jsonrpc": "2.0", "method": "notifications/progress",
+                          "params": {"progressToken": token, "progress": n,
+                                     "message": "still working (%d s)" % int(n * tick)}})
+            threading.Thread(target=ticker, name="ecuh-progress", daemon=True).start()
+        try:
+            resp = server.handle_line(text)
+        finally:
+            done.set()
         if resp is not None:
-            out.write(json.dumps(resp, ensure_ascii=False, separators=(",", ":")).encode("utf-8") + b"\n")
-            out.flush()
+            send(resp)

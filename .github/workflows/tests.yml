@@ -10,12 +10,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
-        python: ["3.8", "3.11", "3.13", "3.14"]
+        include:
+          - {os: windows-latest, python: "3.8"}
+          - {os: windows-latest, python: "3.11"}
+          - {os: windows-latest, python: "3.13"}
+          - {os: windows-latest, python: "3.14"}
+          - {os: ubuntu-22.04, python: "3.8"}     # newer Ubuntu images no longer offer Python 3.8
+          - {os: ubuntu-latest, python: "3.11"}
+          - {os: ubuntu-latest, python: "3.13"}
+          - {os: ubuntu-latest, python: "3.14"}
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
       - name: Unit tests

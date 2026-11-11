@@ -16,14 +16,14 @@ It works on Vector DaVinci Configurator Classic projects and on any other projec
 
 | Part | Status |
 |---|---|
-| Read, search and edit ECUC values (containers, parameters, references) | Tested: 72 automated tests, byte-exact edits, two independent readers cross-checked |
+| Read, search and edit ECUC values (containers, parameters, references) | Tested: 73 automated tests, byte-exact edits, two independent readers cross-checked |
 | Change sessions: snapshot, baseline, gate, review report, undo | Tested |
 | MCP server (protocol 2026-07-28, and 2025-11-25 and older) | Tested with a protocol-level client. Not yet confirmed by a person inside VS Code or the Copilot app |
 | Driver for DaVinci Configurator Classic 6 (`dvcfg-b`) | Experimental. Written from Vector's public documentation and tested against a stand-in executable only. Confirm it with [docs/WORK-PC-CHECK.md](docs/WORK-PC-CHECK.md) |
 | Driver for DaVinci Developer Adaptive (`DvCliAdaptive`) | Experimental, same caveat |
 | Other ARXML: software components, system descriptions, Adaptive manifests | Can be searched and read. Cannot be edited |
 | DaVinci Configurator Classic 5, DaVinci Developer Classic | Their ECUC files can be read and edited at file level. No tool driver yet |
-| Platforms | Developed on Windows with Python 3.10. The test workflow (badge above) runs Windows and Linux with Python 3.8 to 3.14 |
+| Platforms | Developed on Windows with Python 3.10. The test workflow (badge above) runs the tests on Windows and Linux with Python 3.8, 3.11, 3.13 and 3.14 |
 
 ## Try it in two minutes
 
@@ -46,7 +46,7 @@ Then:
    - "Add an 8-bit signal Sig_OilPressure to IPdu_EngineData without overlapping the other signals."
    - "Rename PDU Pdu_EngineData to Pdu_Engine."
 
-For a PC where only single files may be copied: `python tools/build_pyz.py` makes `dist/ecuh.pyz`, the whole harness in one 80 kB file that is used the same way (`python ecuh.pyz init`). A `pyproject.toml` is included for `pip install .`, which is not tested yet.
+For a PC where only single files may be copied: `python tools/build_pyz.py` makes `dist/ecuh.pyz`, the whole harness in one file of about 85 kB that is used the same way (`python ecuh.pyz init`). A `pyproject.toml` is included for `pip install .`, which is not tested yet.
 
 ## Use it on your own project
 
@@ -137,7 +137,7 @@ Speed on one laptop (Windows, Python 3.10), one configuration file of the given 
 | 31 MB | 20,000 | 1.3 s | 0.1 s | 1.4 s | 1.9 s |
 | 115 MB | 75,000 | 4.5 s | under 0.5 s | 5.3 s | 6.8 s |
 
-The server starts loading in the background as soon as the host starts it. A vendor tool driver adds the tool's own run time when a change is opened, validated and finished; it is not run inside each edit unless you set `driver.validateOnEdit`.
+The server starts loading in the background as soon as the host starts it, and reports progress during long calls to hosts that ask for it. A vendor tool driver adds the tool's own run time when a change is opened, validated and finished; it is not run inside each edit unless you set `driver.validateOnEdit`.
 
 ## Works with weak and strong models
 
@@ -211,7 +211,7 @@ ecuh mcp                                   the server; started by the AI host
 ## Development
 
 ```
-python -m unittest discover -s tests       # 72 tests, about ten seconds
+python -m unittest discover -s tests       # 73 tests, about ten seconds
 python tools/build_pyz.py                  # dist/ecuh.pyz
 ```
 
