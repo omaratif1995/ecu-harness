@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ecu-harness"
+version = "0.2.0"
+description = "An AI agent harness for AUTOSAR ECU configuration tools: safe, verified ARXML edits over MCP."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+dependencies = []
+keywords = ["autosar", "arxml", "ecuc", "mcp", "agent", "harness"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Software Development :: Embedded Systems",
+]
+
+[project.scripts]
+ecuh = "ecuharness.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+ecuharness = ["recipes/*.md"]
