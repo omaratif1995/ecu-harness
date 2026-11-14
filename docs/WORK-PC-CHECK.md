@@ -1,6 +1,6 @@
 # Checking the harness against the real tool
 
-The drivers for DaVinci Configurator Classic 6 and DaVinci Developer Adaptive were written from Vector's public documentation, on a PC without the tools. This page is the check to run once on a PC that has them. It takes about 20 minutes and never changes your real project.
+The drivers for DaVinci Configurator Classic 6 and DaVinci Developer Adaptive were written from Vector's public documentation, on a PC without the tools. This page is the check to run once on a PC that has them. It takes about half an hour and never changes your real project.
 
 Follow your company's rules before copying anything to or from a work PC. The harness is plain Python source (or the single file `ecuh.pyz`), needs only Python 3.8+, and has no network code.
 
@@ -57,9 +57,22 @@ Ask for a small, harmless change, for example the value of one integer parameter
 4. Run an update or generation in the tool and look again: is the value still the one the harness set?
 5. Ask the assistant to make and then discard a second change, and confirm the files are back to their previous bytes.
 
-## 6. What to note down
+## 6. Merge and compare on real files
 
-These are the open questions. The answers decide what has to change in `drivers.py`.
+These two functions do not need the vendor tool to run, but nobody has yet seen what a vendor tool says about a file they produced.
+
+1. Compare: take two versions of a real input file (a DBC, or the ECU extract) and ask the assistant what changed, or run `ecuh call ecu_compare new=<path> old=<path>`. Check a few rows against what you know changed.
+2. Merge, in a scratch clone of the copy:
+   - make two branches from one commit, change the same module in DaVinci Configurator on both (for example add one container on each side, and change one parameter to two different values), commit both;
+   - merge one into the other. Git stops with a conflict;
+   - run `ecuh merge`. It should list only the parameter you changed on both sides. Decide it (`ecuh merge --theirs c1`);
+   - open the project in DaVinci Configurator. Does it load? Are both containers there? Does validation agree with `ecuh call ecu_validate`?
+3. Optional: `ecuh merge --install-driver`, then repeat the merge. Branches without a real conflict should now merge without stopping.
+4. If your installation has a command for updating the project from its input files (`dvcfg-b project --help`; `ecuh-probe.json` lists it), approve it as a task in `ecuharness.json` as the README shows, and let the assistant run it with a goal. `ecu_change_diff` should list what the tool rewrote.
+
+## 7. What to note down
+
+These are the open questions. The answers decide what has to change in `drivers.py` and in the merge.
 
 | Question | Where to look |
 |---|---|
@@ -72,5 +85,9 @@ These are the open questions. The answers decide what has to change in `drivers.
 | Does DaVinci Configurator keep a value the harness changed, also on a parameter it derives from input files, and without rewriting unrelated lines when it saves? | step 5 |
 | How long does one validation take with the background process running? | `seconds` in the probe file |
 | Does the AI host wait long enough for a slow validation? The first `ecu_edit` of a change and every `ecu_change_finish` run the vendor tool. If the host gives up, the change is still open: ask the assistant to continue | step 5 |
+| Does the vendor tool load a file the harness merged, without a model merge error, and does it keep the merged content when it saves? | step 6 |
+| Does the tool reorder or re-identify (new UUIDs) containers when it saves? The merge ignores both; a tool that rewrites much more would make every merge large | compare the file before and after a save in your version control |
+| Which command updates the project from its input files on your installation, and with which options? | `dvcfg-b project --help`, `ecuh-probe.json` |
+| Which files does that update rewrite? | `config_files_changed_by_tool` in the result of `ecu_script_run` |
 
 For DaVinci Developer Adaptive the same procedure applies: `init` recognises the `.adpa` project file and uses `DvCliAdaptive`. Adaptive manifests can be searched and read through the tools; validation and generation go through the driver.

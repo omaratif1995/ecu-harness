@@ -67,6 +67,8 @@ class Protocol(Case):
         names = [p["name"] for p in self.rpc("prompts/list")["result"]["prompts"]]
         self.assertIn("work-loop", names)
         self.assertIn("trace-and-mirror", names)
+        self.assertIn("merge-conflicts", names)
+        self.assertEqual(len(names), 13)
         m = self.rpc("prompts/get", {"name": "work-loop", "arguments": {"task": "Do X"}})["result"]["messages"]
         self.assertTrue(m[0]["content"]["text"].endswith("Task: Do X"))
 
@@ -153,21 +155,24 @@ class Schemas(unittest.TestCase):
                     self.assertTrue(set(s.get("required", [])) <= set(s["properties"]), where)
 
     def test_definitions_fit_a_small_context_budget(self):
-        specs = [t.spec() for t in available(None)]
-        size = sum(len(json.dumps({k: s[k] for k in ("name", "description", "inputSchema")},
-                                  separators=(",", ":"))) for s in specs)
-        self.assertLessEqual(len(specs), 10)
-        self.assertLess(size, 6500, "tool definitions grew to %d characters" % size)
+        def size(tools):
+            return sum(len(json.dumps({k: s[k] for k in ("name", "description", "inputSchema")},
+                                      separators=(",", ":"))) for s in (t.spec() for t in tools))
+
+        always = available(None)                    # the tools every project gets
+        self.assertLessEqual(len(always), 11)
+        self.assertLess(size(always), 6700, "tool definitions grew to %d characters" % size(always))
+        self.assertLess(size(TOOLS), 8000, "with every optional tool: %d characters" % size(TOOLS))
 
     def test_read_only_tools_are_marked_so_hosts_can_skip_confirmation(self):
         ro = {t.name for t in TOOLS if t.spec()["annotations"]["readOnlyHint"]}
         self.assertEqual(ro, {"ecu_overview", "ecu_find", "ecu_get", "ecu_describe", "ecu_validate",
-                              "ecu_change_diff", "ecu_recipe"})
+                              "ecu_change_diff", "ecu_compare", "ecu_recipe"})
 
 
 class Hygiene(unittest.TestCase):
     def test_no_network_no_shell_no_third_party_imports(self):
-        std = {"__future__", "argparse", "binascii", "copy", "difflib", "fcntl", "fnmatch", "gc", "glob", "hashlib",
+        std = {"__future__", "argparse", "binascii", "bisect", "contextlib", "copy", "difflib", "fcntl", "fnmatch", "gc", "glob", "hashlib",
                "html", "importlib", "json", "msvcrt", "os", "pkgutil", "re", "shutil", "stat", "subprocess", "sys",
                "tempfile", "threading", "time", "traceback", "uuid", "xml"}
         pkg = os.path.join(SRC, "ecuharness")

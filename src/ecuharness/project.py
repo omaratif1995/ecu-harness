@@ -31,12 +31,14 @@ DEFAULT_CONFIG = {
         "maxRemovalsPerChange": 25,
         "readOnlyModules": [],
         "protectedPaths": [],
+        "approvalPaths": [],               # changes below these paths need a person's approval to finish
         "allowGenerate": True,
         "scriptTasks": {},
         # values of these parameters are never shown to the AI host
         "maskedParams": ["*Password*", "*Passphrase*", "*Secret*", "*KeyElementInitValue*"],
     },
     "checks": {"foreignRefs": False},
+    "tools": {"off": []},                  # names of tools this project does not need
     "recipes": ["ecu-recipes"],
 }
 
@@ -46,6 +48,30 @@ def masked(policy, name):
 
 
 _MODDEF_NAME = re.compile(br"<(?:\w+:)?ECUC-MODULE-DEF\b[^>]*>\s*<(?:\w+:)?SHORT-NAME>\s*([^<\s]+)")
+_SCHEMA = re.compile(br"AUTOSAR_([0-9A-Za-z\-]+)\.xsd")
+_IMPL = re.compile(br"<(?:\w+:)?BSW-IMPLEMENTATION\b.*?</(?:\w+:)?BSW-IMPLEMENTATION>", re.S)
+
+
+def schema_of(data):
+    """The AUTOSAR schema file an ARXML file names in its first lines, e.g. AUTOSAR_00048.xsd."""
+    m = _SCHEMA.search(data[:4000])
+    return "AUTOSAR_%s.xsd" % m.group(1).decode("ascii") if m else None
+
+
+def impls_of(data):
+    """Version facts of the BSW implementations described in a definition file."""
+    out = []
+    for m in _IMPL.finditer(data):
+        blk = m.group(0)
+        d = {}
+        for key, tag in (("name", b"SHORT-NAME"), ("sw_version", b"SW-VERSION"),
+                         ("autosar_release", b"AR-RELEASE-VERSION"), ("vendor_id", b"VENDOR-ID")):
+            mm = re.search(br"<(?:\w+:)?" + tag + br">\s*([^<]*?)\s*</", blk)
+            if mm and mm.group(1):
+                d[key] = mm.group(1).decode("utf-8", "replace")
+        if d:
+            out.append(d)
+    return out[:8]
 
 
 def _merge(base, over):
@@ -81,6 +107,8 @@ class SrcFile:
         self.merge_problems = []
         self.defnames = None      # definition files: module definitions inside (None = unknown)
         self.loaded = False       # definition files are only parsed when a module needs them
+        self.schema = None        # AUTOSAR schema file named in the header
+        self.impls = []           # definition files: BSW implementation versions
 
     def set_data(self, data, scanned=None):
         old = self.scan
@@ -89,6 +117,7 @@ class SrcFile:
             dispose(old.root)
         self.data = data
         self.sha = sha256(data)
+        self.schema = schema_of(data)
         self.enc = detect_encoding(data)
         self.nl = "\r\n" if b"\r\n" in data[:20000] else "\n"
         m = re.search(br"\n([ \t]+)<", data[:20000])
@@ -203,6 +232,7 @@ class Model:
         try:
             sf.set_data(data)
             sf.loaded = True
+            sf.impls = impls_of(data)
             self._attach(sf)
         except Exception as exc:
             sf.scan = None

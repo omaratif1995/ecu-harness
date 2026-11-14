@@ -4,7 +4,9 @@ Every edit happens inside one open *change*: it has a stated goal, a snapshot
 of each file before its first modification, a validation baseline taken when it
 began, and a journal of every operation. A change can be reviewed (diff),
 checked against its baseline (only new findings count), finished (writes a
-review report) or discarded (restores the snapshot).
+review report and a machine-readable audit record) or discarded (restores the
+snapshot). A finished change can still be undone by a person. Changes that
+touch paths the project owner listed need that person's approval to finish.
 
 All state lives on disk under ``.ecuharness/changes/<id>``, so it survives
 restarts of the server and does not depend on any connection.
@@ -12,6 +14,7 @@ restarts of the server and does not depend on any connection.
 from __future__ import annotations
 
 import binascii
+import fnmatch
 import json
 import os
 import time
@@ -25,6 +28,24 @@ from .project import masked
 
 def now():
     return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def os_user():
+    return os.environ.get("USERNAME") or os.environ.get("USER") or "unknown"
+
+
+def checks_text(checks):
+    """The ledger of checks as one sentence the assistant can pass on word for word."""
+    groups = {"fail": [], "pass": [], "not run": []}
+    for name, result in checks.items():
+        for status in groups:
+            if result.startswith(status):
+                detail = result[len(status):].strip(" :;")
+                if detail.startswith("(") and detail.endswith(")"):
+                    detail = detail[1:-1]
+                groups[status].append(name.replace("_", " ") + (" (%s)" % detail if detail else ""))
+                break
+    return " ".join("%s: %s." % (s, ", ".join(v)) for s, v in groups.items() if v)
 
 
 if os.name == "nt":
@@ -311,10 +332,27 @@ class Changes:
     def _snapshot(self, ch, sf):
         self._snapshot_bytes(ch, sf.rel, sf.data)
 
+    @staticmethod
+    def _created(ch, rel):
+        """Did a tool run of this change create the file? (Not an outside edit a person accepted.)"""
+        info = (ch.get("files") or {}).get(rel)
+        return info is not None and info.get("before") is None and not info.get("external")
+
+    def _set_aside(self, ch, sf):
+        """Undo the creation of a file: move it into the change's folder, never delete it."""
+        dst = os.path.join(self._dir(ch["id"]), "created", sf.rel.replace("/", os.sep))
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        with open(dst, "wb") as fh:
+            fh.write(sf.data)
+        os.remove(sf.path)
+        return "%s (created by this change; moved to %s)" % (sf.rel, self.project.rel(dst))
+
     def _snapshot_bytes(self, ch, rel, data):
         """Keep the content a file had before this change first touched it."""
         if os.path.isabs(rel):
             raise ToolError("%s lies outside the project folder and cannot be edited." % rel)
+        if self._created(ch, rel):
+            return                              # before this change the file did not exist: nothing to keep
         dst = os.path.join(self._dir(ch["id"]), "snapshot", rel.replace("/", os.sep))
         if not os.path.exists(dst):
             os.makedirs(os.path.dirname(dst), exist_ok=True)
@@ -369,10 +407,14 @@ class Changes:
     def diff(self, ch):
         cfg = self._config()
         lines = []
-        for rel in sorted(ch.get("files") or {}):
+        for rel, info in sorted((ch.get("files") or {}).items()):
             snap = os.path.join(self._dir(ch["id"]), "snapshot", rel.replace("/", os.sep))
             sf = cfg.get(rel)
             if not os.path.isfile(snap):
+                if self._created(ch, rel):                  # a vendor tool created it during this change
+                    if sf is not None and sf.scan:
+                        lines.extend(diff_roots(None, sf.scan.root, self.project.policy))
+                    continue
                 lines.append("? %s was changed outside the harness and accepted by a human; "
                              "that part is not covered by this diff" % rel)
                 continue
@@ -399,23 +441,176 @@ class Changes:
                             "be reached validly, call ecu_change_discard and tell the user why.",
                             {"new": [f.to_dict() for f in d["blocking"][:8]]} if d["blocking"] else None)
         lines = self.diff(ch)
+        need = self.approval_needed(ch, lines)
+        if need and not self.approved(ch):
+            from .hostsetup import cli_for
+            raise ToolError(
+                "This change is valid, but it needs a person's approval before it can be finished: it touches "
+                "%s%s, which the project owner put under approval." % (", ".join(need[:4]),
+                                                                    " and %d more" % (len(need) - 4) if len(need) > 4 else ""),
+                "Stop here. Tell the user what you changed and why, and ask them to review and approve it in a "
+                "terminal with `%s change approve`. After that, call ecu_change_finish again. Never run that "
+                "command yourself." % cli_for(self.project.root),
+                {"needs_approval": need[:8]})
+        checks = self.checks(ch, findings, drv)
         ch["status"] = "finished"
         ch["finished"] = now()
         ch["summary"] = " ".join(str(summary or "").split())[:1000]
+        ch["checks"] = checks
+        ch["git"] = self._git()
+        ch["user"] = os_user()
         report = os.path.join(self._dir(ch["id"]), "report.md")
         write_file(report, self._report(ch, lines, findings, d, drv).encode("utf-8"))
+        write_file(os.path.join(self._dir(ch["id"]), "audit.json"),
+                   json.dumps(self._audit(ch, lines, findings, d, drv), indent=1, ensure_ascii=False).encode("utf-8"))
         self._save(ch)
         self._forget_snapshots()
         self._journal(ch, {"event": "finish", "changes": len(lines)})
-        return {"report": self.project.rel(report), "lines": lines, "delta": d}
+        return {"report": self.project.rel(report), "lines": lines, "delta": d, "checks": checks_text(checks)}
+
+    # ---- approval --------------------------------------------------------
+    def approval_needed(self, ch, lines):
+        """Changed paths that match policy.approvalPaths (empty list: no approval needed)."""
+        pats = self.project.policy.get("approvalPaths") or []
+        if not pats:
+            return []
+        hit = []
+        for ln in lines:
+            parts = ln.split(" ", 2)
+            if ln.startswith("? "):
+                hit.append("%s (changed outside the harness)" % ln[2:].split(" was changed outside", 1)[0])
+            elif len(parts) > 1 and parts[1].startswith("/") and parts[1] not in hit:
+                if any(fnmatch.fnmatchcase(parts[1], pat) for pat in pats):
+                    hit.append(parts[1])
+        return hit
+
+    def approved(self, ch):
+        """An approval counts only for exactly the file contents it was given for."""
+        a = ch.get("approval")
+        return bool(a) and a.get("hashes") == ch.get("hashes")
+
+    def approve(self, ch, who):
+        """Human-only: approve the open change as it is now."""
+        self.require_clean(ch)
+        ch["approval"] = {"by": who, "at": now(), "hashes": dict(ch["hashes"])}
+        self._save(ch)
+        self._journal(ch, {"event": "approve", "by": who})
+        return ch["approval"]
+
+    def mark_generated(self, ch):
+        ch["generated"] = dict(ch["hashes"])
+        self._save(ch)
+
+    # ---- what was checked, and what was not ------------------------------
+    def checks(self, ch, findings, drv):
+        """Honest ledger for the report: every check is pass, fail or not run."""
+        m = self.project.model
+        errors = [f for f in findings if f.severity == "error"]
+        own = [f for f in errors if f.source == "structure"]
+        untyped = [x.name for x in m.modules() if x.defref not in m.defs]
+        earlier = lambda n: "pass for this change; %d earlier error(s) remain" % n if n else "pass"   # noqa: E731
+        # structure = well-formed XML, names, references, multiplicities
+        out = {"structure": "fail: a file cannot be read" if any("cannot parse" in p for p in m.problems)
+               else earlier(len(own))}
+        if untyped and len(untyped) == len(m.modules()):
+            out["types_and_ranges"] = "not run: no module definitions loaded"
+        elif untyped:
+            out["types_and_ranges"] = "pass; not run for %s (no definitions)" % ", ".join(untyped[:6])
+        else:
+            out["types_and_ranges"] = "pass"
+        out["xsd_schema"] = "not run: no schema validator in the harness"
+        dtype = self.project.driver.type
+        if dtype == "none":
+            out["vendor_validation"] = "not run: no tool driver configured"
+        elif drv is None or drv.status != "ok":
+            out["vendor_validation"] = "fail: the tool did not complete"
+        else:
+            out["vendor_validation"] = earlier(len(errors) - len(own)) + (" (simulator, not a vendor tool)"
+                                                                         if dtype == "sim" else " (%s)" % dtype)
+        out["code_generation"] = "pass: ran after the last edit" if ch.get("generated") == ch.get("hashes") else "not run"
+        out["build_and_tests"] = "not run: outside the harness"
+        return out
+
+    def _git(self):
+        try:
+            from .gitio import Repo
+            return Repo(self.project.root).head()
+        except ToolError:
+            return None
+
+    def _audit(self, ch, lines, findings, d, drv):
+        """Machine-readable record of a finished change."""
+        return {
+            "change": ch["id"], "goal": ch["goal"], "ticket": ch.get("ticket"), "summary": ch.get("summary"),
+            "opened": ch["created"], "finished": ch["finished"], "user": ch.get("user"),
+            "harness": __version__, "driver": dict(self.project.driver_info()),
+            "git": ch.get("git"), "approval": ({k: v for k, v in ch["approval"].items() if k != "hashes"}
+                                               if self.approved(ch) else None),
+            "files": [{"path": rel, "sha256_before": info.get("before"), "sha256_after": info.get("after"),
+                       "edited_outside": bool(info.get("external"))}
+                      for rel, info in sorted((ch.get("files") or {}).items())],
+            "changes": lines,
+            "checks": ch.get("checks"),
+            "findings": {"before": {"errors": ch["baseline"]["errors"], "warnings": ch["baseline"]["warnings"]},
+                         "after": {"errors": sum(1 for f in findings if f.severity == "error"),
+                                   "warnings": sum(1 for f in findings if f.severity == "warning")},
+                         "new": [f.to_dict() for f in d["new"]],
+                         "resolved": [f.to_dict() for f in d["resolved"]]},
+            "journal": "journal.jsonl", "previous_files": "snapshot/",
+            "undo": "ecuh change undo %s" % ch["id"],
+        }
+
+    def undo(self, cid, who):
+        """Human-only: restore the files a finished change modified, if nothing touched them since."""
+        ch = self._load(cid)
+        if ch is None:
+            raise ToolError("There is no change '%s'." % cid, "`ecuh change list` shows the changes.")
+        if ch.get("status") != "finished":
+            raise ToolError("Change %s is %s, not finished." % (cid, ch.get("status")),
+                            "An open change is undone with ecu_change_discard.")
+        if self.current() is not None:
+            raise ToolError("Another change is open.", "Finish or discard it first.")
+        cfg = self._config()
+        snap_root = os.path.join(self._dir(cid), "snapshot")
+        todo, blocked = [], []
+        for rel, info in sorted((ch.get("files") or {}).items()):
+            snap = os.path.join(snap_root, rel.replace("/", os.sep))
+            sf = cfg.get(rel)
+            if sf is None or sf.sha != info.get("after"):
+                blocked.append("%s (changed since)" % rel)
+            elif os.path.isfile(snap) or self._created(ch, rel):
+                todo.append((sf, snap))
+            else:
+                blocked.append("%s (no copy of the earlier content)" % rel)
+        if blocked:
+            raise ToolError("Change %s cannot be undone automatically: %s." % (cid, ", ".join(blocked)),
+                            "Undo it in your version control instead. Nothing was changed.")
+        done = []
+        for sf, snap in todo:
+            if os.path.isfile(snap):
+                with open(snap, "rb") as fh:
+                    write_file(sf.path, fh.read())
+                done.append(sf.rel)
+            else:
+                done.append(self._set_aside(ch, sf))
+        self.project.model.refresh()
+        ch["status"] = "undone"
+        ch["undone"] = {"by": who, "at": now()}
+        self._save(ch)
+        self._journal(ch, {"event": "undo", "by": who, "files": done})
+        return done
 
     def discard(self, ch):
         snap_root = os.path.join(self._dir(ch["id"]), "snapshot")
-        restored = []
+        restored, gone = [], set()
         cfg = self._config()
         for rel, info in (ch.get("files") or {}).items():
             snap = os.path.join(snap_root, rel.replace("/", os.sep))
             if not os.path.isfile(snap):
+                sf = cfg.get(rel)
+                if self._created(ch, rel) and sf is not None and sf.sha == ch["hashes"].get(rel):
+                    restored.append(self._set_aside(ch, sf))
+                    gone.add(rel)
                 continue
             with open(snap, "rb") as fh:
                 data = fh.read()
@@ -423,7 +618,9 @@ class Changes:
             write_file(target, data)
             restored.append(rel)
         self.project.model.refresh()
-        left = [r for r in self.external(ch) if r.split(" ")[0] not in restored]
+        bare = lambda r: r[:-len(" (deleted)")] if r.endswith(" (deleted)") else (    # noqa: E731
+            r[:-len(" (new)")] if r.endswith(" (new)") else r)                         # (file names may hold spaces)
+        left = [r for r in self.external(ch) if bare(r) not in restored and bare(r) not in gone]
         ch["status"] = "discarded"
         ch["finished"] = now()
         self._save(ch)
@@ -441,6 +638,10 @@ class Changes:
                "| Ticket | %s |" % (ch.get("ticket") or "-"),
                "| Opened / finished | %s / %s |" % (ch["created"], ch["finished"]),
                "| Harness / driver | ecu-harness %s / %s (%s) |" % (__version__, self.project.driver.type, drv.status),
+               "| Git | %s |" % ("branch %s at %s" % (ch["git"].get("branch") or "?", ch["git"].get("commit") or "?")
+                                 if ch.get("git") else "not a git repository, or git not found"),
+               "| Approval | %s |" % ("%s, %s" % (ch["approval"]["by"], ch["approval"]["at"]) if self.approved(ch)
+                                      else "not required by project policy"),
                "", "## Summary by the agent", "", ch.get("summary") or "(none given)", "",
                "## What changed (%d)" % len(lines), ""]
         out += ["    " + ln for ln in lines[:500]] or ["Nothing."]
@@ -456,6 +657,9 @@ class Changes:
             out.append("- New %s %s at %s: %s" % (f.severity, f.id, f.path, f.message))
         for f in d["resolved"][:50]:
             out.append("- Resolved %s %s at %s: %s" % (f.severity, f.id, f.path, f.message))
+        out += ["", "## Checks", "", "| Check | Result |", "|---|---|"]
+        for name, result in (ch.get("checks") or {}).items():
+            out.append("| %s | %s |" % (name.replace("_", " "), result))
         out += ["", "## Files", ""]
         for rel, info in sorted((ch.get("files") or {}).items()):
             out.append("- `%s`  %s -> %s%s" % (rel, (info.get("before") or "?")[:12], (info.get("after") or "?")[:12],
@@ -466,5 +670,8 @@ class Changes:
                 "- Structural checks ran on the whole model%s."
                 % ("" if self.project.driver.type == "none" else " and the tool driver validated it"),
                 "- Open the project in the vendor tool before you release: this harness does not replace its validation.",
+                "- To undo this change later: `ecuh change undo %s`. It works while the files are still as this "
+                "change left them." % ch["id"],
+                "- The same facts are in `audit.json` next to this report, for other tools to read.",
                 ""]
         return "\n".join(out)

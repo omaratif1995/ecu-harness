@@ -362,6 +362,23 @@ class CliDriver(Driver):
             return "driver.bswPackage is not set in ecuharness.json."
         return None
 
+    def _command_task(self, spec, args, reports):
+        """A task the owner wrote down as words of the vendor command line, e.g.
+        ["project", "update"]. {project} and {bsw} are filled in; without them the
+        usual project and package options are appended."""
+        if args:
+            return DriverResult("failed", detail="This task takes no arguments.")
+        words = [str(w) for w in spec["command"]]
+        if any("{project}" in w or "{bsw}" in w for w in words):
+            words = [w.replace("{project}", str(self._project_arg())).replace("{bsw}", str(self.bsw or ""))
+                     for w in words]
+        else:
+            words = words + self._base()
+        return self._exec(words, reports)
+
+    def _project_arg(self):
+        return self.cfg.get("project") or self.project.root
+
     def _exec(self, args, reports):
         missing = self._missing()
         if missing:
@@ -427,6 +444,8 @@ class Dvcfg6Driver(CliDriver):
 
     def run_script(self, task, args):
         spec = (self.project.policy.get("scriptTasks") or {}).get(task) or {}
+        if spec.get("command"):
+            return self._command_task(spec, args, self._reports())
         if args:
             return DriverResult("failed", detail="Arguments for dvcfg-b script tasks are not supported yet.")
         if not spec.get("location"):
@@ -470,6 +489,8 @@ class DvAdaptiveDriver(CliDriver):
 
     def run_script(self, task, args):
         spec = (self.project.policy.get("scriptTasks") or {}).get(task) or {}
+        if spec.get("command"):
+            return self._command_task(spec, args, [])
         cmd = ["run"] + self._base() + ["--tasks=%s" % task]
         for k, v in (args or {}).items():
             cmd.append("--task-args=%s:%s=%s" % (task, k, v))

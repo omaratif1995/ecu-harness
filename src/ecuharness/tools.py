@@ -23,13 +23,14 @@ import xml.etree.ElementTree as ET
 
 from . import InternalError, ToolError
 from .arxml import CONTVAL, MODCONF, PKG, Cont, iter_conts, mult_text, parse_number
-from .changes import Changes, Lock
+from .changes import Changes, Lock, os_user
 from .edit import OPS, short
 from .project import masked, typed_value
 
 S, I, B = "string", "integer", "boolean"
 RECIPES = ("work-loop", "add-container", "change-values", "fix-findings", "rename-remove",
-           "trace-and-mirror", "review-change", "when-blocked")
+           "trace-and-mirror", "review-change", "when-blocked", "merge-conflicts", "integrate-input",
+           "plan-large-change", "os-tasks", "final-report")
 
 
 class Tool:
@@ -92,6 +93,12 @@ def overview(ctx):
             d["readonly"] = True
         mods.append(d)
     out = {"project": p.name, "modules": mods, "driver": p.driver_info()}
+    schemas = {}
+    for sf in m.files.values():
+        if sf.role == "config" and sf.schema:
+            schemas[sf.schema] = schemas.get(sf.schema, 0) + 1
+    if schemas:                             # one name; or, when the files disagree, how many files use each
+        out["autosar_schema"] = next(iter(schemas)) if len(schemas) == 1 else schemas
     if len(m.modules()) > 80:
         out["more_modules"] = len(m.modules()) - 80
     others = {}
@@ -104,7 +111,21 @@ def overview(ctx):
     out["open_change"] = {"goal": ch["goal"], "edits": ch["edits"]} if ch else None
     if m.problems:
         out["problems"] = m.problems[:5]
-    if mods:
+    pending, todo = _merge_pending(p)
+    marked = [sf.rel for sf in m.files.values() if sf.error and _MARKER.search(sf.data) and sf.rel not in pending]
+    pending += marked
+    if pending:
+        out["merge_conflicts"] = pending[:10]
+        if not _in_git(p.root):
+            out["next"] = ("These files contain conflict markers and cannot be read. Tell the user: the conflict "
+                           "must be resolved in their version control first. Never edit the markers by hand.")
+        elif todo or marked:
+            out["next"] = ("A git merge has not settled these .arxml files. Call ecu_merge. Never edit conflict "
+                           "markers by hand.")
+        else:
+            out["next"] = ("Every merge conflict in these files is decided. Staging them (git add) and committing "
+                           "are the user's steps.")
+    elif mods:
         out["next"] = "Look with ecu_find / ecu_get. To change something call ecu_edit with a goal."
     elif others:
         out["next"] = ("No ECU configuration modules here; the other elements can be searched with "
@@ -145,13 +166,14 @@ def _values(ctx, entries, only=None):
        "show": _p(S, "Parameter names to include in each result, comma-separated."),
        "targets_of": _p(S, "Path: only the containers that this container refers to."),
        "users_of": _p(S, "Path: only the containers that refer to this container."),
+       "count_by": _p(S, "Parameter name: count matches per value of it instead of listing them."),
        "scope": _p(S, "config = ECUC containers (default); definitions = parameter definitions; "
                       "all = every named element of all loaded ARXML files.",
                    enum=["config", "definitions", "all"]),
        "limit": _p(I, "Maximum results, default 20."),
        "offset": _p(I, "Skip this many results (paging).")})
 def find(ctx, query=None, kind=None, under=None, param=None, value=None, show=None, targets_of=None,
-         users_of=None, scope="config", limit=20, offset=0):
+         users_of=None, count_by=None, scope="config", limit=20, offset=0):
     m = ctx.model
     limit = max(1, min(int(limit), 100))
     offset = max(0, int(offset))
@@ -164,21 +186,26 @@ def find(ctx, query=None, kind=None, under=None, param=None, value=None, show=No
     prefix = None
     if targets_of or users_of:
         cands, seen = [], set()
+        # a relation of a container includes those of the containers inside it
         if targets_of:
             src = m.resolve(targets_of)
-            for e in getattr(src, "refs", None) or ():
-                n = m.node(e.value) if e.value else None
-                if n is not None and id(n) not in seen:
-                    seen.add(id(n))
-                    cands.append(n)
-                    via[id(n)] = e.name
+            base = src.path().rstrip("/") + "/"
+            for owner in [src] + (list(iter_conts(src)) if isinstance(src, Cont) else []):
+                for e in getattr(owner, "refs", None) or ():
+                    n = m.node(e.value) if e.value else None
+                    if n is not None and id(n) not in seen and not (n.path() + "/").startswith(base):
+                        seen.add(id(n))
+                        cands.append(n)
+                        via[id(n)] = e.name if owner is src else "%s.%s" % (owner.path()[len(base):], e.name)
         else:
             tgt = m.resolve(users_of)
-            for c, e in m.refs_to().get(tgt.path(), ()):
-                if id(c) not in seen:
-                    seen.add(id(c))
-                    cands.append(c)
-                    via[id(c)] = e.name
+            base = tgt.path().rstrip("/") + "/"
+            for part in [tgt] + (list(iter_conts(tgt)) if isinstance(tgt, Cont) else []):
+                for c, e in m.refs_to().get(part.path(), ()):
+                    if id(c) not in seen and not (c.path() + "/").startswith(base):
+                        seen.add(id(c))
+                        cands.append(c)
+                        via[id(c)] = e.name if part is tgt else "%s (to %s)" % (e.name, part.path()[len(base):])
         if under:
             prefix = m.resolve(under).path().rstrip("/") + "/"
         sources = [cands]
@@ -190,6 +217,8 @@ def find(ctx, query=None, kind=None, under=None, param=None, value=None, show=No
     wnum = parse_number(want) if want is not None else None
     knd = kind.strip().lower() if kind else None
     shown = [x.strip().lower() for x in re.split(r"[,;\s]+", show or "") if x.strip()][:8]
+    by = count_by.strip().lower() if count_by else None
+    groups = {}
     matches, total = [], 0
     for source in sources:
         for n in source:
@@ -214,6 +243,15 @@ def find(ctx, query=None, kind=None, under=None, param=None, value=None, show=No
                         continue
                 hit = _values(ctx, es)
             total += 1
+            if by:
+                es = [e for e in list(getattr(n, "params", None) or ()) + list(getattr(n, "refs", None) or ())
+                      if e.name.lower() == by]
+                for v in ([("***" if masked(ctx.policy, e.name) else (e.value or "")) for e in es] or ["(not set)"]):
+                    g = groups.setdefault(v, [0, []])
+                    g[0] += 1
+                    if len(g[1]) < 3:
+                        g[1].append(n.name)
+                continue
             if offset < total <= offset + limit:
                 row = {"path": n.path()}
                 if not knd:
@@ -225,6 +263,13 @@ def find(ctx, query=None, kind=None, under=None, param=None, value=None, show=No
                 if shown and isinstance(n, Cont):
                     row.update(_values(ctx, list(n.params or ()) + list(n.refs or ()), shown))
                 matches.append(row)
+    if by:
+        ranked = sorted(groups.items(), key=lambda kv: (-kv[1][0], kv[0]))
+        out = {"total": total, "counted_by": count_by,
+               "groups": [{"value": v, "count": g[0], "first": g[1]} for v, g in ranked[offset:offset + limit]]}
+        if len(ranked) > offset + limit:
+            out["more"] = "%d more values; raise offset." % (len(ranked) - offset - limit)
+        return out
     out = {"total": total, "matches": matches}
     if total > offset + limit:
         out["more"] = "%d more; raise offset or narrow the search." % (total - offset - limit)
@@ -440,6 +485,10 @@ def describe(ctx, kind=None, path=None, filter=None):
     out = {"definition": d.path, "type": "module" if d.is_module else "container"}
     if not d.is_module:
         out["count_allowed"] = mult_text(d)
+    elif getattr(d.file, "impls", None):    # version facts from the module's own definition file
+        out["implementation"] = d.file.impls[:3]
+        if d.file.schema:
+            out["definition_schema"] = d.file.schema
     if d.desc:
         out["about"] = d.desc[:300]
     f = (filter or "").lower()
@@ -635,10 +684,11 @@ def change_diff(ctx):
 def change_finish(ctx, summary):
     ch = ctx.changes.require()
     r = ctx.changes.finish(ch, summary)
-    out = {"status": "finished", "changes": r["lines"][:40], "report": r["report"]}
+    out = {"status": "finished", "changes": r["lines"][:40], "checks": r["checks"], "report": r["report"]}
     if len(r["lines"]) > 40:
         out["more_changes"] = len(r["lines"]) - 40
-    out["next"] = "Tell the user what changed and where the report is. They review and commit."
+    out["next"] = ("Tell the user what changed, the checks sentence as it is (also what was not run) and where "
+                   "the report is. They review and commit.")
     return out
 
 
@@ -673,17 +723,22 @@ def _driver_action(ctx, label, run):
       "Run the code generator of the vendor tool. Slow; only when the user asked for it.",
       write=True, when=lambda p: p.driver.type != "none" and p.policy.get("allowGenerate", True))
 def generate(ctx):
-    return _driver_action(ctx, "generate", lambda d: d.generate())
+    out = _driver_action(ctx, "generate", lambda d: d.generate())
+    ch = ctx.changes.current()
+    if ch is not None:
+        ctx.changes.mark_generated(ch)
+    return out
 
 
-@tool("ecu_script_run", "Run an approved script task",
-      "Run one of the automation script tasks the project owner approved.",
-      {"task": _p(S, "Name of the approved script task."),
+@tool("ecu_script_run", "Run an approved vendor tool task",
+      "Run a vendor tool task the project owner approved, e.g. the update from the input files.",
+      {"task": _p(S, "Name of the approved task."),
+       "goal": _p(S, "Why, in one sentence. Runs the task inside a change: reviewable and undoable."),
        "args": {"type": "array", "description": "Arguments, if the task takes any.",
                 "items": {"type": "object", "required": ["name", "value"],
                           "properties": {"name": {"type": S}, "value": {"type": S}}}}},
       required=("task",), write=True, when=lambda p: bool(p.policy.get("scriptTasks")))
-def script_run(ctx, task, args=None):
+def script_run(ctx, task, args=None, goal=None):
     allowed = ctx.policy.get("scriptTasks") or {}
     if task not in allowed:
         raise ToolError("'%s' is not an approved script task." % task,
@@ -695,7 +750,222 @@ def script_run(ctx, task, args=None):
         if not isinstance(a, dict) or "name" not in a:
             raise ToolError("Each entry of 'args' needs 'name' and 'value'.")
         kv[str(a["name"])] = str(a.get("value", ""))
-    return _driver_action(ctx, "script %s" % task, lambda d: d.run_script(task, kv))
+    opened = ctx.changes.current() is None and bool(goal)
+    if opened:
+        ctx.changes.begin(goal)
+    try:
+        out = _driver_action(ctx, "script %s" % task, lambda d: d.run_script(task, kv))
+    except ToolError as exc:
+        if opened:                                      # the files the tool touched are recorded in that change
+            exc.hint = ((exc.hint or "") + " A change was opened for this task: ecu_change_diff shows what the "
+                        "tool modified before it stopped, ecu_change_discard restores the files.").strip()
+        raise
+    if ctx.changes.current() is not None:
+        if opened:
+            out["opened_change"] = True
+        out["next"] = ("ecu_change_diff shows what the task changed. Then ecu_validate and ecu_change_finish, or "
+                       "ecu_change_discard to restore the files.")
+    elif out.get("config_files_changed_by_tool"):
+        out["next"] = "No change was open, so these modifications are not recorded and cannot be undone here."
+    return out
+
+
+# --------------------------------------------------------------------------
+# Merging branches, comparing input files
+# --------------------------------------------------------------------------
+def _conflict_row(path, c, many):
+    row = {"id": c["id"]}
+    if many:
+        row["file"] = path
+    row["where"] = c["where"]
+    for k in ("param", "field", "element"):
+        if c.get(k):
+            row[k] = c[k]
+    if c["kind"] != "value":
+        row["kind"] = c["kind"]
+    for k in ("base", "ours", "theirs"):
+        if c.get(k) is not None:
+            row[k] = c[k]
+    if c.get("calculated"):
+        row["calculated"] = True
+    return row
+
+
+_MARKER = re.compile(br"^<<<<<<< ", re.M)
+
+
+def _in_git(root):
+    """Is the folder inside a git working tree? (Only the file system is asked.)"""
+    from .gitio import git_dir_of
+    return git_dir_of(root) is not None
+
+
+def _merge_pending(project):
+    """The .arxml files a git merge, rebase or cherry-pick has not settled yet, as project paths, and
+    whether any of them still needs ecu_merge (not merged yet, or a conflict without a decision).
+    Git is only started while such an operation is in progress, so this is cheap otherwise. With the
+    merge driver the files carry no conflict markers, so this is the only way to see them."""
+    from .gitio import Repo, git_dir_of, operation_in
+    from .gitmerge import STATE_NAME
+    gd = git_dir_of(project.root)
+    if gd is None or operation_in(gd) is None:
+        return [], False
+    try:
+        repo = Repo(project.root)
+        unmerged = repo.unmerged()
+    except ToolError:
+        return [], False
+    try:
+        with open(os.path.join(repo.gitdir, STATE_NAME), "r", encoding="utf-8") as fh:
+            state = json.load(fh).get("files") or {}
+    except (OSError, ValueError, AttributeError):
+        state = {}
+    out, todo = [], False
+    for path in sorted(unmerged):
+        if not path.lower().endswith(".arxml"):
+            continue
+        out.append(project.rel(repo.abs(path)))
+        st, e = unmerged[path], state.get(path) or {}
+        if (e.get("stages") != [st.get(1), st.get(2), st.get(3)] or e.get("skipped")
+                or any(not c.get("decision") for c in e.get("conflicts") or ())):
+            todo = True
+    return out, todo
+
+
+@tool("ecu_merge", "Merge conflicted ARXML",
+      "After git stopped on conflicts in .arxml files: merges them by element, not by text line, and "
+      "lists only the real conflicts with base, ours, theirs. Then pass each id in take_theirs or keep_ours.",
+      {"take_theirs": {"type": "array", "description": "Conflict ids that take their side.",
+                       "items": {"type": S}},
+       "keep_ours": {"type": "array", "description": "Conflict ids that keep our side.", "items": {"type": S}},
+       "offset": _p(I, "Paging: skip this many open conflicts.")},
+      write=True, when=lambda p: _in_git(p.root))
+def merge(ctx, take_theirs=None, keep_ours=None, offset=0):
+    from .gitmerge import MergeSession
+    from .changes import write_file
+    ch = ctx.changes.current()
+    if ch is not None:
+        raise ToolError("A change is open (%s)." % ch["goal"],
+                        "Close it first with ecu_change_finish or ecu_change_discard; a merge and a change "
+                        "must not mix.")
+    ses = MergeSession(ctx.project.root, masked=lambda n: masked(ctx.policy, n)).sync()
+    if take_theirs or keep_ours:
+        ses.decide(take_theirs or (), keep_ours or (), who=os_user())
+    files = ses.files()
+    op = ses.repo.operation()
+    if not files:
+        out = {"status": "No .arxml file is in conflict."}
+        if ses.other:
+            out["other_conflicted_files"] = ses.other[:10]
+        out["next"] = ("Git is in the middle of a %s; finishing it is the user's step." % op if op
+                       else "Nothing to merge.")
+        return out
+    rows = []
+    for path in sorted(files):
+        e = files[path]
+        if e.get("skipped"):
+            rows.append({"file": path, "not_merged": e["skipped"]})
+        else:
+            row = {"file": path, "merged_from_theirs": e.get("count", 0), "conflicts": len(e["conflicts"])}
+            still = sum(1 for c in e["conflicts"] if not c.get("decision"))
+            if still:
+                row["open"] = still
+            rows.append(row)
+    out = {"files": rows}
+    if op == "rebase":
+        out["note"] = "Rebase: 'ours' is the branch being rebased onto, 'theirs' is the commit being replayed."
+    open_ = ses.conflicts(only_open=True)
+    offset = max(0, int(offset))
+    page = open_[offset:offset + 20]
+    if page:
+        out["conflicts"] = [_conflict_row(path, c, len(files) > 1) for path, c in page]
+        if len(open_) > offset + 20:
+            out["more"] = "%d more open conflicts; raise offset." % (len(open_) - offset - 20)
+    if ses.other:
+        out["other_conflicted_files"] = ses.other[:10]
+    ctx.model.refresh()
+    extra = []
+    skipped = [r["file"] for r in rows if "not_merged" in r]
+    if open_:
+        out["next"] = ("Ask the user which side each conflict takes, unless they already said. Then call "
+                       "ecu_merge with take_theirs and keep_ours. For a value that is neither side: keep_ours, "
+                       "then ecu_edit.")
+        if any(c.get("calculated") for _, c in open_):
+            out["next"] += " A conflict marked calculated is computed by the vendor tool: keep_ours is enough."
+    else:
+        # the vendor tool is slow, so it runs on request; the built-in checks run right away
+        fast = ctx.project.driver.type in ("none", "sim")
+        findings = ctx.changes.run_validation(None)[0] if fast else ctx.changes.structure_check()
+        errs = _by_severity([f for f in findings if f.severity == "error"])
+        out["errors"] = len(errs)
+        tail = "" if fast else " Then run ecu_validate: the vendor tool has not judged the merge yet."
+        stage = "Staging the files (git add) and committing are the user's steps; do not do them."
+        if errs:
+            out["first"] = [f.to_dict() for f in errs[:5]]
+            out["next"] = ("Every conflict is decided, but the merged configuration has errors: changes that merge "
+                           "cleanly can still contradict each other. Fix them with ecu_edit." + tail)
+        elif skipped:
+            out["next"] = "Tell the user about the files that were not merged; those are theirs to settle in git."
+        else:
+            out["next"] = "Every conflict is decided%s. %s" % (
+                " and validation shows no error" if fast else "; run ecu_validate for the vendor tool's verdict",
+                stage)
+        extra = ["## Checks after the merge", "",
+                 "%s: %d error(s)." % ("Structure and tool driver" if fast else "Structure only (the vendor tool "
+                                       "has not validated the merge yet)", len(errs))]
+        extra += ["- %s %s: %s" % (f.id, f.path, f.message) for f in errs[:50]] + [""]
+    report = os.path.join(ctx.project.state, "merge", "report.md")
+    os.makedirs(os.path.dirname(report), exist_ok=True)
+    write_file(report, ses.report(extra).encode("utf-8"))
+    out["report"] = ctx.project.rel(report)
+    return out
+
+
+@tool("ecu_compare", "Compare two versions of a file",
+      "What changed between two versions of an ARXML or DBC file (customer input, ECU extract, "
+      "configuration): elements added, removed, renamed, changed, and where their names occur in this project.",
+      {"new": _p(S, "Path of the new version."),
+       "old": _p(S, "Path of the earlier version; default: the last committed version of 'new'."),
+       "query": _p(S, "Only changes whose path contains this text."),
+       "offset": _p(I, "Paging: skip this many changes.")},
+      required=("new",))
+def compare(ctx, new, old=None, query=None, offset=0):
+    from .compare import compare_files, in_project, resolve, summarize
+    limit = 25
+    offset = max(0, int(offset))
+    old_label, new_label, rows, schemas = compare_files(ctx.project, new, old, lambda n: masked(ctx.policy, n))
+    out = {"old": old_label, "new": new_label}
+    if schemas[0] != schemas[1]:
+        out["autosar_schema"] = {"old": schemas[0], "new": schemas[1]}
+    if not rows:
+        out["summary"] = "no difference in content"
+        return out
+    out["summary"] = summarize(rows)
+    q = (query or "").strip().lower()
+    if q:
+        rows = [r for r in rows if q in r["path"].lower()]
+    page = rows[offset:offset + limit]
+    new_path = os.path.normcase(os.path.abspath(resolve(ctx.project, new)))
+    own = ctx.model.files.get(new_path)
+    if own is None or own.role != "config":             # for an input file: where do its names occur here?
+        for r in page:
+            names = [r["path"].rsplit("/", 1)[-1]] + ([r["from"]] if r.get("from") else [])
+            hits, total = [], 0
+            for nm in names:
+                h, t = in_project(ctx.model, nm)
+                hits += [x for x in h if x not in hits]
+                total += t
+            if hits:
+                r["in_project"] = hits[:3]
+                if total > 3:
+                    r["in_project_more"] = total - 3
+    out["total"] = len(rows)
+    out["changes"] = page
+    if len(rows) > offset + limit:
+        out["more"] = "%d more; raise offset or narrow with query." % (len(rows) - offset - limit)
+    out["next"] =("in_project = containers whose name contains the element's name; verify with ecu_get. "
+                   "Procedure: ecu_recipe integrate-input.")
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -752,7 +1022,10 @@ def recipe(ctx, name=None):
 # --------------------------------------------------------------------------
 def available(project=None):
     out = []
+    off = ((project.cfg.get("tools") or {}).get("off") or []) if project is not None else []
     for t in TOOLS:
+        if t.name in off:                   # the project owner switched it off to save context
+            continue
         if t.when is not None:
             try:
                 if project is None or not t.when(project):
@@ -820,7 +1093,11 @@ def clean_args(t, args):
                 try:
                     v = json.loads(v)
                 except ValueError:
-                    raise ToolError("Argument '%s' must be a JSON list." % k)
+                    if (t.props[k].get("items") or {}).get("type") != S:
+                        raise ToolError("Argument '%s' must be a JSON list." % k)
+                    v = [x for x in re.split(r"[,;\s]+", v) if x]       # "c1, c2" for ["c1", "c2"]
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                v = [str(v)]
             if isinstance(v, dict):
                 v = [v]
             if not isinstance(v, list):

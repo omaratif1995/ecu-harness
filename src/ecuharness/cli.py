@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
+import re
 import sys
 
 from . import ToolError, __version__
@@ -41,7 +43,7 @@ def cmd_init(a):
     from .hostsetup import init
     root = find_root(a.project)
     hosts = tuple(h.strip() for h in a.hosts.split(",") if h.strip())
-    lines = init(root, a.dry_run, a.driver, a.exe, a.bsw_package, hosts)
+    lines = init(root, a.dry_run, a.driver, a.exe, a.bsw_package, hosts, a.merge_driver)
     _out("ecu-harness init in %s%s" % (root, "  (dry run, nothing written)" if a.dry_run else ""))
     for ln in lines:
         _out(ln)
@@ -158,7 +160,7 @@ def cmd_call(a):
 
 
 def cmd_change(a):
-    from .changes import Changes, Lock
+    from .changes import Changes, Lock, os_user
     p = _project(a)
     p.model.refresh()
     ch = Changes(p)
@@ -166,12 +168,116 @@ def cmd_change(a):
         for c in ch.all():
             _out("  %s  %-9s %s  edits:%d  %s" % (c["id"], c["status"], c["created"], c.get("edits", 0), c["goal"][:60]))
         return 0
+    if a.action == "undo":
+        if not a.id:
+            _out("usage: ecuh change undo <id>     (ecuh change list shows the ids)")
+            return 2
+        with Lock(p.state):
+            files = ch.undo(a.id, os_user())
+        _out("Change %s is undone. Restored: %s" % (a.id, ", ".join(files) or "nothing"))
+        return 0
+    if a.action == "approve":
+        cur = ch.require()
+        lines = ch.diff(cur)
+        need = ch.approval_needed(cur, lines)
+        _out("Change %s: %s" % (cur["id"], cur["goal"]))
+        for ln in lines[:200]:
+            _out("    " + ln)
+        if len(lines) > 200:
+            _out("    ... %d more lines" % (len(lines) - 200))
+        _out("Under approval: %s" % (", ".join(need) or "nothing in this change (approval is not required)"))
+        nobody = "An approval is the decision of a person. Run this command yourself in a terminal."
+        if not sys.stdin.isatty():
+            _out(nobody)
+            return 2
+        _out("Approving covers exactly the content above. Any later edit needs a new approval.")
+        try:
+            answer = input("Type the change id (%s) to approve, anything else to cancel: " % cur["id"])
+        except EOFError:                    # no keyboard behind the terminal after all
+            _out("")
+            _out(nobody)
+            return 2
+        if answer.strip() != cur["id"]:
+            _out("Not approved.")
+            return 1
+        with Lock(p.state):
+            ch.approve(cur, os_user())
+        _out("Approved by %s. The assistant can now finish the change." % os_user())
+        return 0
     with Lock(p.state):
         cur = ch.require()
-        ext = ch.accept_external(cur, os.environ.get("USERNAME") or os.environ.get("USER") or "human")
+        ext = ch.accept_external(cur, os_user())
     _out("Accepted %d outside edit(s) into change %s: %s" % (len(ext), cur["id"], ", ".join(ext) or "none"))
     _out("They are recorded in the journal and marked in the report as not covered by the diff.")
     return 0
+
+
+def cmd_merge(a):
+    from .changes import Lock, os_user, write_file
+    from .gitio import Repo
+    from .gitmerge import MergeSession, driver_command
+    from .project import DEFAULT_CONFIG, Project, masked
+    root = find_root(a.project)
+    if a.install_driver or a.remove_driver:
+        repo = Repo(root)
+        for ln in (repo.install_driver(driver_command()) if a.install_driver else repo.remove_driver()):
+            _out("  " + ln)
+        if a.install_driver:
+            _out("From now on git merges *.arxml by element in this clone (merge, rebase, cherry-pick).")
+            _out("Each colleague runs this once in their own clone.")
+        return 0
+    try:
+        project = Project(root)
+        policy = project.policy
+    except ToolError:
+        project, policy = None, DEFAULT_CONFIG["policy"]
+    split = lambda s: [x for x in re.split(r"[,\s]+", s or "") if x]        # noqa: E731
+    with (Lock(project.state) if project is not None else contextlib.suppress()):   # as the tools do
+        ses = MergeSession(root, masked=lambda n: masked(policy, n)).sync(redo=a.redo)
+        if a.theirs or a.ours:
+            ses.decide(split(a.theirs), split(a.ours), who=os_user())
+    files = ses.files()
+    if not files:
+        _out("No .arxml file is in conflict.")
+        return 0
+    left = skipped = 0
+    for path in sorted(files):
+        e = files[path]
+        if e.get("skipped"):
+            _out("%s: not merged: %s." % (path, e["skipped"]))
+            skipped += 1
+            continue
+        still = [c for c in e["conflicts"] if not c.get("decision")]
+        left += len(still)
+        _out("%s: %d change(s) taken from their side, %d conflict(s), %d open"
+             % (path, e.get("count", 0), len(e["conflicts"]), len(still)))
+        for c in e["conflicts"]:
+            _out("  %-5s %-7s %s %s" % (c["id"], c.get("decision") or "OPEN", c["where"],
+                                       c.get("param") or c.get("field") or "(%s)" % c["kind"]))
+            _out("        base: %s | ours: %s | theirs: %s%s" % (
+                c.get("base", "-"), c.get("ours", "-"), c.get("theirs", "-"),
+                "   (calculated by the tool on both sides)" if c.get("calculated") else ""))
+    if ses.other:
+        _out("Other conflicted files, not handled here: %s" % ", ".join(ses.other))
+    report = (os.path.join(project.state, "merge", "report.md") if project is not None
+              else os.path.join(ses.repo.gitdir, "ecuh-merge-report.md"))
+    os.makedirs(os.path.dirname(report), exist_ok=True)
+    write_file(report, ses.report().encode("utf-8"))
+    _out("Report: %s" % report)
+    if left:
+        _out("Open conflicts hold our side for now. Decide each one, for example:  ecuh merge --theirs %s"
+             % next(c["id"] for _, c in ses.conflicts(only_open=True)))
+        return 1
+    if skipped:
+        _out("The files above are yours to settle in git.")
+        return 1
+    _out("Every conflict is decided. Validate, then `git add` the files and commit.")
+    return 0
+
+
+def cmd_merge_file(a):
+    from .gitmerge import driver
+    return driver(a.base, a.ours, a.theirs, a.path, a.output)
 
 
 def cmd_probe(a):
@@ -204,6 +310,8 @@ def main(argv=None):
     sp.add_argument("--driver", choices=["none", "sim", "dvcfg6", "dvadaptive"], help="tool driver for a new config")
     sp.add_argument("--exe", help="full path of the vendor command line (dvcfg-b, DvCliAdaptive)")
     sp.add_argument("--bsw-package", help="path of the BSW package")
+    sp.add_argument("--merge-driver", action="store_true",
+                    help="also let git merge *.arxml by element in this clone")
     add("doctor", cmd_doctor, "check the setup and start the server once")
     sp = add("demo", cmd_demo, "create a small synthetic ECU project to try things out")
     sp.add_argument("dir")
@@ -215,8 +323,22 @@ def main(argv=None):
     sp.add_argument("args", nargs="*", help="name=value pairs, one JSON object, @file.json, or - for stdin")
     sp.add_argument("--compact", action="store_true", help="one-line JSON even in a terminal")
     sp.add_argument("--pretty", action="store_true", help="indented JSON")
-    sp = add("change", cmd_change, "list changes, or accept edits made outside the harness")
-    sp.add_argument("action", choices=["list", "accept-external"])
+    sp = add("change", cmd_change, "list changes; as a person: approve, undo, or accept outside edits")
+    sp.add_argument("action", choices=["list", "approve", "undo", "accept-external"])
+    sp.add_argument("id", nargs="?", help="change id (undo)")
+    sp = add("merge", cmd_merge, "merge .arxml files that git left in conflict, by element")
+    sp.add_argument("--theirs", help="comma list of conflict ids that take their side")
+    sp.add_argument("--ours", help="comma list of conflict ids that keep our side")
+    sp.add_argument("--redo", action="store_true", help="merge again from git's three versions, dropping "
+                                                         "hand edits and earlier decisions")
+    sp.add_argument("--install-driver", action="store_true", help="let git itself merge *.arxml this way")
+    sp.add_argument("--remove-driver", action="store_true")
+    sp = add("merge-file", cmd_merge_file, "merge three versions of one file (called by git as merge driver)")
+    sp.add_argument("base")
+    sp.add_argument("ours")
+    sp.add_argument("theirs")
+    sp.add_argument("--path", help="name of the file, for messages")
+    sp.add_argument("-o", "--output", help="write the result here instead of over the 'ours' file")
     sp = add("probe", cmd_probe, "record how the vendor command line behaves on this PC")
     sp.add_argument("--validate", action="store_true", help="also run one real validation")
     sp.add_argument("--include-output", action="store_true", help="include tool output text (may name project data)")

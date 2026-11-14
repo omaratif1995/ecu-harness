@@ -457,6 +457,27 @@ class FirstRun(unittest.TestCase):
             r = subprocess.run([cli, "call", "ecu_change_finish", "@finish.json"], cwd=proj, capture_output=True)
             self.assertIn(b'"status":"finished"', r.stdout, r.stdout + r.stderr)
             self.assertTrue(os.path.isfile(os.path.join(proj, ".ecuharness", "ecuh")))     # for bash users
+            if shutil.which("git"):                 # git must be able to call the harness from these paths too
+                from ecuharness.evals import _edit_files, _git
+                _git(proj, "init", "-q")
+                _git(proj, "checkout", "-q", "-b", "main")
+                r = subprocess.run(ecuh + ["merge", "--install-driver"], cwd=proj, capture_output=True)
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                _git(proj, "add", "-A")
+                _git(proj, "commit", "-q", "-m", "base")
+                sig = "/ActiveEcuC/Com/ComConfig/Sig_EngineTemp"
+                _git(proj, "checkout", "-q", "-b", "feature")
+                _edit_files(proj, [{"op": "set", "path": sig, "param": "ComSignalInitValue", "value": "50"}])
+                _git(proj, "commit", "-q", "-am", "feature")
+                _git(proj, "checkout", "-q", "main")
+                _edit_files(proj, [{"op": "set", "path": sig, "param": "ComBitSize", "value": "7"}])
+                _git(proj, "commit", "-q", "-am", "main")
+                r = _git(proj, "merge", "feature", "-m", "both")
+                self.assertIn("merged by element, no conflict", r.stderr)
+                with open(os.path.join(proj, "Config", "ECUC", "DemoEcu_Com_ecuc.arxml"), "rb") as fh:
+                    data = fh.read()
+                self.assertIn(b"<VALUE>50</VALUE>", data)
+                self.assertIn(b"<VALUE>7</VALUE>", data)
         finally:
             shutil.rmtree(base, ignore_errors=True)
 

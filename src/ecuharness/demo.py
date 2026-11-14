@@ -335,9 +335,44 @@ def module_arxml(mod, conts):
     return HEAD % CFG_PKG.strip("/") + "\n".join(out) + "\n" + TAIL
 
 
+DBC = """VERSION ""
+
+NS_ :
+
+BS_:
+
+BU_: DemoEcu Gateway
+
+BO_ 256 EngineData: 8 DemoEcu
+ SG_ EngineSpeed : 0|16@1+ (0.25,0) [0|16383.75] "rpm" Gateway
+ SG_ EngineTemp : 16|8@1+ (1,-40) [-40|215] "degC" Gateway
+ SG_ ThrottlePos : 24|8@1+ (0.4,0) [0|100] "%%" Gateway
+
+BO_ 512 BodyStatus: %(dlc)d Gateway
+ SG_ DoorState : 0|%(door)d@1+ (1,0) [0|%(doormax)d] "" DemoEcu
+ SG_ LightState : 4|4@1+ (1,0) [0|15] "" DemoEcu
+%(extra)s
+BA_DEF_ BO_ "GenMsgCycleTime" INT 0 10000;
+BA_DEF_DEF_ "GenMsgCycleTime" 0;
+BA_ "GenMsgCycleTime" BO_ 256 10;
+BA_ "GenMsgCycleTime" BO_ 512 100;
+VAL_ 512 DoorState 0 "closed" 1 "open" ;
+"""
+
+
+def demo_dbc(new=False):
+    """The CAN database the demo configuration follows, and a later delivery of it:
+    BodyStatus shrinks to 6 bytes, DoorState to 3 bits, and WindowState is new."""
+    if new:
+        return DBC % {"dlc": 6, "door": 3, "doormax": 7,
+                      "extra": ' SG_ WindowState : 8|4@1+ (1,0) [0|15] "" DemoEcu\n'}
+    return DBC % {"dlc": 8, "door": 4, "doormax": 15, "extra": ""}
+
+
 def write_demo(root, extra_signals=0, crlf=False, name="DemoEcu"):
     """Create the demo project in ``root`` (must be empty or absent)."""
-    files = {"Bswmd/Demo_bswmd.arxml": definitions_arxml()}
+    files = {"Bswmd/Demo_bswmd.arxml": definitions_arxml(),
+             "Input/Vehicle.dbc": demo_dbc(), "Input/Vehicle_v2.dbc": demo_dbc(new=True)}
     for mod, conts in demo_values(extra_signals).items():
         files["Config/ECUC/%s_%s_ecuc.arxml" % (name, mod)] = module_arxml(mod, conts)
     cfg = {

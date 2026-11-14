@@ -1,6 +1,6 @@
 """ECU Harness: an AI agent harness for AUTOSAR ECU configuration tools."""
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 class ToolError(Exception):
