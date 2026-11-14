@@ -5,7 +5,7 @@ import shutil
 import tempfile
 import unittest
 
-from util import COM, COM_FILE, GOAL, NVM, OS, PDU, SWC, Case, fake_tool
+from util import COM, COM_FILE, GOAL, NVM, OS, PDU, SWC, Case, fake_tool, remove_tree
 
 from ecuharness import ToolError, hostsetup
 from ecuharness.changes import Changes, Lock
@@ -399,7 +399,7 @@ class Setup(Case):
             self.reopen()
             self.assertIn("/DEMO/Com/ComConfig/ComSignal", self.p.model.defs)
         finally:
-            shutil.rmtree(bsw, ignore_errors=True)
+            remove_tree(bsw)
 
     def test_a_project_without_ecuc_files_is_set_up_for_reading(self):
         root = tempfile.mkdtemp(prefix="ecuh_ro_")
@@ -414,7 +414,7 @@ class Setup(Case):
             self.assertTrue(ok, lines)
             self.assertTrue(any("searched and read, not edited" in ln for ln in lines))
         finally:
-            shutil.rmtree(root, ignore_errors=True)
+            remove_tree(root)
 
     def test_doctor_starts_the_server_and_the_terminal_fallback(self):
         hostsetup.init(self.root)
@@ -479,7 +479,7 @@ class FirstRun(unittest.TestCase):
                 self.assertIn(b"<VALUE>50</VALUE>", data)
                 self.assertIn(b"<VALUE>7</VALUE>", data)
         finally:
-            shutil.rmtree(base, ignore_errors=True)
+            remove_tree(base)
 
 
 class Cli(Case):

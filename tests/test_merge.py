@@ -9,7 +9,7 @@ import sys
 import tempfile
 import unittest
 
-from util import COM, DEM, NVM, OS, SRC, SWC, Case
+from util import COM, DEM, NVM, OS, SRC, SWC, Case, remove_tree
 
 from ecuharness import ToolError
 from ecuharness.arxml import scan
@@ -411,7 +411,7 @@ def edited_demo(seed, n, crlf=False):
                 out[f] = fh.read()
         return out
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        remove_tree(tmp)
 
 
 class Laws(unittest.TestCase):
@@ -702,7 +702,7 @@ class Driver(unittest.TestCase):
         self.dir = tempfile.mkdtemp(prefix="ecuh_drv_")
 
     def tearDown(self):
-        shutil.rmtree(self.dir, ignore_errors=True)
+        remove_tree(self.dir)
 
     def put(self, name, data):
         path = os.path.join(self.dir, name)

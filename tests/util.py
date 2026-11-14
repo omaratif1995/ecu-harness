@@ -1,6 +1,5 @@
 import json
 import os
-import shutil
 import sys
 import tempfile
 import unittest
@@ -11,6 +10,7 @@ if SRC not in sys.path:
 
 from ecuharness.changes import Changes            # noqa: E402
 from ecuharness.demo import write_demo            # noqa: E402
+from ecuharness.evals import remove_tree          # noqa: E402,F401  (also used by the test modules)
 from ecuharness.project import Project            # noqa: E402
 from ecuharness.tools import call_tool            # noqa: E402
 
@@ -83,7 +83,7 @@ class Case(unittest.TestCase):
         self.p.model.refresh()
 
     def tearDown(self):
-        shutil.rmtree(self.root, ignore_errors=True)
+        remove_tree(self.root)
 
     def reopen(self):
         self.p = Project(self.root)

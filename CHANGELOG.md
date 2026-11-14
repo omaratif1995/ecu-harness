@@ -26,6 +26,7 @@ Changed:
 Fixed:
 
 - Discarding a change reported files as not restored when their names contained spaces.
+- On Windows, `ecuh eval run` (and the tests) left temporary folders with a git repository behind, because git marks its files read-only.
 
 ## 0.2.0
 

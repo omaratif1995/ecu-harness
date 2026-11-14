@@ -18,7 +18,9 @@ import glob
 import json
 import os
 import shutil
+import stat
 import subprocess
+import sys
 import tempfile
 
 from . import ToolError
@@ -38,6 +40,23 @@ OS = "/ActiveEcuC/Os/"
 
 def T(tool, **args):
     return {"tool": tool, "args": args}
+
+
+def remove_tree(path):
+    """Delete a temporary folder, also when it holds a git repository: git marks its object files
+    read-only, and on Windows shutil.rmtree gives up on those. The mark is cleared and the step retried."""
+    def retry(func, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except OSError:
+            pass                            # still in use: leave it, as ignore_errors would
+
+    if os.path.lexists(path):
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(path, onexc=retry)
+        else:
+            shutil.rmtree(path, onerror=retry)
 
 
 def V(param, value):
@@ -287,7 +306,7 @@ def grade(task, target):
             if sf.role == "config" and sf.rel in ref_files and sf.scan and ref_files[sf.rel].scan:
                 lines.extend(diff_roots(ref_files[sf.rel].scan.root, sf.scan.root, p.policy))
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        remove_tree(tmp)
     out = []
     for chk in task["checks"]:
         kind = chk[0]
@@ -372,7 +391,7 @@ def run_reference(task):
                 return [("reference step %s" % step["tool"], False, json.dumps(result)[:300])], 0, chars
         return grade(task, tmp), len(task["solution"]), chars
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        remove_tree(tmp)
 
 
 def main(a):
