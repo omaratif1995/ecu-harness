@@ -78,9 +78,11 @@ Pick the tasks you do most often. Before each one, write down how long it usuall
 | Fix findings | "Fix the validation errors in <module>." |
 | Review | "What changed in Com since the last commit?" |
 
-| Task | Usual time | With the assistant | Result correct? | Notes |
-|---|---|---|---|---|
-| | | | | |
+| Task | Model | Usual time | With the assistant | Result correct? | Notes |
+|---|---|---|---|---|---|
+| | | | | | |
+
+Any model your Copilot offers can be used; the harness is built so that mid-range models work too. If you can, do one task with two models and note both.
 
 The target is half of the usual time on tasks like these. Tasks that need decisions only you can make (identifiers, timing, which example to copy) still need you: the assistant asks for them instead of inventing them.
 
