@@ -350,6 +350,8 @@ class VendorTasks(Case):
             "a = sys.argv[1:]\n"
             "if a[:1] == ['--version']: print('fake 6.3'); sys.exit(0)\n"
             "root = [x[3:] for x in a if x.startswith('-p=')][0]\n"
+            "if a[:2] == ['project', 'validate']:\n"
+            "    open(os.path.join(root, 'validated.txt'), 'a').write('run\\n')\n"
             "if a[:2] == ['project', 'update'] or a[:2] == ['project', 'derive-ecuc']:\n"
             "    open(os.path.join(root, 'ran.txt'), 'a').write(' '.join(a) + '\\n')\n"
             "if a[:2] == ['project', 'update']:\n"
@@ -407,6 +409,29 @@ class VendorTasks(Case):
         self.assertEqual(len(done), 2)
         self.assertFalse(os.path.exists(os.path.join(self.root, new)))
         self.assertEqual(self.values(OS + "Task_10ms", "OsTaskPriority"), ["10"])
+
+    def test_a_new_change_takes_over_the_last_validation_when_nothing_changed(self):
+        def runs():
+            path = os.path.join(self.root, "validated.txt")
+            if not os.path.exists(path):
+                return 0
+            with open(path) as fh:
+                return len(fh.read().split())
+
+        self.ok("ecu_edit", goal="Raise the priority of the ten millisecond task", ops=[SET_PRIO])
+        self.ok("ecu_change_finish", summary="Task_10ms priority 15")
+        self.assertEqual(runs(), 2)                                 # baseline and finish
+        self.ok("ecu_edit", goal="Shorter body status PDU for the new database", ops=[SET_LEN])
+        self.assertEqual(runs(), 2)                                 # the baseline is the finish just before
+        self.assertIn("reused", Changes(self.p).current()["baseline"]["driver"]["detail"])
+        self.ok("ecu_change_finish", summary="Pdu_BodyStatus 6 bytes")
+        self.assertEqual(runs(), 3)                                 # finishing always asks the tool
+        self.ok("ecu_validate")
+        self.assertEqual(runs(), 4)                                 # and so does an explicit validation
+        self.write(self.read() + b"<!-- edited by hand -->\n")      # outside the harness: the files differ
+        self.ok("ecu_edit", goal="Raise the priority of the ten millisecond task again",
+                ops=[dict(SET_PRIO, value="16")])
+        self.assertEqual(runs(), 5)
 
     def test_placeholders_arguments_and_unrecorded_runs(self):
         self.ok("ecu_script_run", task="derive")

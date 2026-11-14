@@ -84,7 +84,7 @@ These are the open questions. The answers decide what has to change in `drivers.
 | Does validation or generation rewrite ECUC files? | the harness reports `config_files_changed_by_tool` |
 | Does DaVinci Configurator keep a value the harness changed, also on a parameter it derives from input files, and without rewriting unrelated lines when it saves? | step 5 |
 | How long does one validation take with the background process running? | `seconds` in the probe file |
-| Does the AI host wait long enough for a slow validation? The first `ecu_edit` of a change and every `ecu_change_finish` run the vendor tool. If the host gives up, the change is still open: ask the assistant to continue | step 5 |
+| Does the AI host wait long enough for a slow validation? The first `ecu_edit` of a change and every `ecu_change_finish` run the vendor tool (a change that opens right after another one finished reuses that result). If the host gives up, the change is still open: ask the assistant to continue | step 5 |
 | Does the vendor tool load a file the harness merged, without a model merge error, and does it keep the merged content when it saves? | step 6 |
 | Does the tool reorder or re-identify (new UUIDs) containers when it saves? The merge ignores both; a tool that rewrites much more would make every merge large | compare the file before and after a save in your version control |
 | Which command updates the project from its input files on your installation, and with which options? | `dvcfg-b project --help`, `ecuh-probe.json` |

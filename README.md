@@ -30,7 +30,7 @@ It works on Vector DaVinci Configurator Classic projects and on any other projec
 
 | Part | Status |
 |---|---|
-| Read, search and edit ECUC values (containers, parameters, references) | Tested: 138 automated tests, byte-exact edits, two independent readers cross-checked |
+| Read, search and edit ECUC values (containers, parameters, references) | Tested: 139 automated tests, byte-exact edits, two independent readers cross-checked |
 | Change sessions: snapshot, baseline, gate, approval, report, audit record, undo | Tested |
 | Merge by element, also as git merge driver | Tested with unit cases, with merge laws checked on random edits of both sides, and in real git repositories. Not yet tried on files written by a vendor tool |
 | Compare of DBC and ARXML files | Tested on synthetic files |
@@ -66,6 +66,8 @@ Then:
 For a PC where only single files may be copied: `python tools/build_pyz.py` makes `dist/ecuh.pyz`, the whole harness in one file of about 125 kB that is used the same way (`python ecuh.pyz init`). A `pyproject.toml` is included for `pip install .`, which is not tested yet.
 
 ## Use it on your own project
+
+For a first trial on a real project, with the time saved measured task by task, follow [docs/TRIAL.md](docs/TRIAL.md).
 
 ```
 cd <your project folder>
@@ -249,7 +251,7 @@ Speed on one laptop (Windows, Python 3.10), one configuration file of the given 
 | 31 MB | 20,000 | 1.3 s | 0.1 s | 1.4 s | 1.9 s | 7 s, 200 MB |
 | 115 MB | 75,000 | 4.5 s | under 0.5 s | 5.3 s | 6.8 s | 29 s, 700 MB |
 
-The server starts loading in the background as soon as the host starts it, and reports progress during long calls to hosts that ask for it. A vendor tool driver adds the tool's own run time when a change is opened, validated and finished; it is not run inside each edit unless you set `driver.validateOnEdit`.
+The server starts loading in the background as soon as the host starts it, and reports progress during long calls to hosts that ask for it. A vendor tool driver adds the tool's own run time when a change is opened, validated and finished; it is not run inside each edit unless you set `driver.validateOnEdit`. A change that opens right after another one finished, with no ARXML file changed in between, takes over that result instead of running the tool again.
 
 ## Works with weak and strong models
 
@@ -331,7 +333,7 @@ ecuh mcp                                   the server; started by the AI host
 ## Development
 
 ```
-python -m unittest discover -s tests       # 138 tests, about a minute; some need git
+python -m unittest discover -s tests       # 139 tests, one to three minutes; some need git
 python tools/build_pyz.py                  # dist/ecuh.pyz
 ```
 

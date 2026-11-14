@@ -22,6 +22,8 @@ Changed:
 - The tools every project gets grew from 5,839 to 6,593 characters (`ecu_compare` is new). `ecu_merge` adds 574 inside a git repository.
 - The harness now starts `git` for reading (conflicted files, last commit, branch and commit). It still never stages or commits.
 - `ecuh doctor` reports how merges are handled and fails when the merge driver of the clone points to a harness or Python that no longer exists.
+- With a vendor tool driver, a change that opens right after another one finished, with no ARXML file changed in between, takes over that validation as its baseline instead of running the tool again. Finishing and `ecu_validate` always run the tool.
+- `docs/TRIAL.md`: how to try the harness on a real project and measure the time saved per task.
 
 Fixed:
 

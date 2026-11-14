@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import binascii
 import fnmatch
+import hashlib
 import json
 import os
 import time
@@ -22,8 +23,12 @@ import time
 from . import ToolError, __version__
 from .arxml import Cont, dispose, iter_conts, scan
 from .check import Finding, check_model
+from .drivers import DriverResult
 from .edit import fmt_change, plan_ops, short
 from .project import masked
+
+LAST_VALIDATION = "last-validation.json"    # the vendor tool's last result, for the baseline of the next change
+REUSE_SECONDS = 2 * 3600                   # older results are not reused: files outside the project may change
 
 
 def now():
@@ -252,10 +257,48 @@ class Changes:
             self._journal(ch, {"event": "driver", "action": label, "modified": modified})
         return result, modified
 
-    def run_validation(self, ch=None):
-        drv, _ = self.run_driver("validate", self.project.driver.validate, ch)
+    def run_validation(self, ch=None, reuse=False):
+        """The structural checks and the tool driver. With ``reuse`` (only for the baseline of a new
+        change) a vendor tool's result is taken over from its last run when no ARXML file changed since:
+        the tool can need minutes, and a change usually begins right where the last one finished."""
+        drv = self._last_validation() if reuse else None
+        if drv is None:
+            drv, _ = self.run_driver("validate", self.project.driver.validate, ch)
+            self._remember_validation(drv)
         findings = check_model(self.project.model, self.project.cfg)
         return findings + list(drv.findings), drv
+
+    def _validation_key(self):
+        """What the harness can see of the vendor tool's input: the ARXML files, the driver settings."""
+        files = sorted((sf.rel, sf.sha) for sf in self.project.model.files.values()
+                       if sf.role in ("config", "readonly"))
+        raw = json.dumps([__version__, self.project.driver.type, self.project.cfg.get("driver"), files],
+                         sort_keys=True, default=str)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _last_validation(self):
+        if self.project.driver.type in ("none", "sim"):            # fast: always run
+            return None
+        try:
+            with open(os.path.join(self.project.state, LAST_VALIDATION), "r", encoding="utf-8") as fh:
+                d = json.load(fh)
+            if d["key"] != self._validation_key() or not 0 <= time.time() - d["time"] <= REUSE_SECONDS:
+                return None
+            return DriverResult("ok", [Finding.from_dict(f) for f in d["findings"]],
+                                "result of the run at %s reused: no ARXML file changed since" % d["at"])
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    def _remember_validation(self, drv):
+        path = os.path.join(self.project.state, LAST_VALIDATION)
+        if drv.status != "ok" or self.project.driver.type in ("none", "sim"):
+            if os.path.isfile(path):
+                os.remove(path)                                     # a failed run voids the old result
+            return
+        os.makedirs(self.project.state, exist_ok=True)
+        write_file(path, json.dumps({"key": self._validation_key(), "time": time.time(), "at": now(),
+                                     "findings": [f.to_dict() for f in drv.findings]},
+                                    ensure_ascii=False).encode("utf-8"))
 
     def structure_check(self):
         return check_model(self.project.model, self.project.cfg)
@@ -294,7 +337,7 @@ class Changes:
         goal = " ".join(str(goal or "").split())
         if len(goal) < 8:
             raise ToolError("The goal is too short.", "Say in one sentence what will change and why.")
-        findings, drv = self.run_validation(None)
+        findings, drv = self.run_validation(None, reuse=True)
         ch = {
             "id": "ch-" + binascii.hexlify(os.urandom(3)).decode("ascii"),
             "goal": goal[:300], "ticket": ticket or None, "status": "open", "created": now(),

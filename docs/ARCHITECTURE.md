@@ -112,7 +112,7 @@ For an input file the tool adds, per row, the configuration containers whose sho
 
 State is on disk under `.ecuharness/changes/<id>/`: `change.json`, `baseline.json`, `journal.jsonl`, `snapshot/`, `report.md`, `audit.json`. One change is open at a time, so no tool needs a change id.
 
-- **Baseline**: all findings when the change began. Validation compares against it, so only findings the change introduced count.
+- **Baseline**: all findings when the change began. Validation compares against it, so only findings the change introduced count. A vendor tool can need minutes, so the baseline takes over the tool's last result when the ARXML files and the driver settings are still exactly as they were then, for at most two hours; finishing and `ecu_validate` always run the tool. Files the harness does not read (the BSW package, input files the tool reads by itself) are not part of that comparison: after changing those, run `ecu_validate` once before the next change.
 - **Gate**: no new errors (or no new findings at all with `policy.gate: "no-new-findings"`), and the tool driver completed.
 - **Approval**: if a changed path matches `policy.approvalPaths`, finishing is refused until a person ran `ecuh change approve`. The approval stores the content hashes of the files; any later modification voids it. The command asks for the change id on the keyboard and refuses when there is no keyboard.
 - **Hashes**: the expected content hash of every editable file. A mismatch means someone edited outside the harness; everything stops until a person decides.
