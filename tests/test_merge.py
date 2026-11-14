@@ -663,6 +663,25 @@ class InGit(Case):
         _git(self.root, "commit", "-q", "-m", "merged")
         self.assertNotIn("merge_conflicts", self.ok("ecu_overview"))
 
+    def test_a_project_opened_through_a_link_still_names_its_own_files(self):
+        """Git names folders as they really are. A project opened through a junction, a mapped drive or a
+        short name (GitHub's Windows machines keep temp files under one) must still see its own paths."""
+        link = self.root + "_link"
+        if os.name == "nt":
+            if subprocess.run(["cmd", "/c", "mklink", "/J", link, self.root], capture_output=True).returncode:
+                self.skipTest("cannot create a junction here")
+        else:
+            os.symlink(self.root, link)
+        self.addCleanup(lambda: os.rmdir(link) if os.name == "nt" else os.remove(link))
+        self.conflicted()
+        real, self.root = self.root, link
+        try:
+            self.reopen()
+            self.assertEqual(sorted(self.ok("ecu_overview")["merge_conflicts"]), [self.COMF, self.OSF])
+            self.assertEqual([c["id"] for c in self.ok("ecu_merge")["conflicts"]], ["c1", "c2"])
+        finally:
+            self.root = real
+
     def test_a_new_git_operation_numbers_its_conflicts_from_c1(self):
         self.conflicted(theirs=self.THEIRS[-1:], ours=self.OURS[-1:])                # only the Os conflict
         self.assertEqual([c["id"] for c in self.ok("ecu_merge")["conflicts"]], ["c1"])

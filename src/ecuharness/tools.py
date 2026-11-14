@@ -820,11 +820,16 @@ def _merge_pending(project):
             state = json.load(fh).get("files") or {}
     except (OSError, ValueError, AttributeError):
         state = {}
-    out, todo = [], False
+    root = os.path.realpath(project.root)               # git names folders as they really are (junctions,
+    out, todo = [], False                               # mapped drives, short names resolved); so must we
     for path in sorted(unmerged):
         if not path.lower().endswith(".arxml"):
             continue
-        out.append(project.rel(repo.abs(path)))
+        try:
+            rel = os.path.relpath(os.path.realpath(repo.abs(path)), root).replace("\\", "/")
+        except ValueError:                              # another drive
+            rel = "../"
+        out.append(path if rel.startswith("../") else rel)
         st, e = unmerged[path], state.get(path) or {}
         if (e.get("stages") != [st.get(1), st.get(2), st.get(3)] or e.get("skipped")
                 or any(not c.get("decision") for c in e.get("conflicts") or ())):

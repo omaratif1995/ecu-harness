@@ -30,7 +30,7 @@ It works on Vector DaVinci Configurator Classic projects and on any other projec
 
 | Part | Status |
 |---|---|
-| Read, search and edit ECUC values (containers, parameters, references) | Tested: 137 automated tests, byte-exact edits, two independent readers cross-checked |
+| Read, search and edit ECUC values (containers, parameters, references) | Tested: 138 automated tests, byte-exact edits, two independent readers cross-checked |
 | Change sessions: snapshot, baseline, gate, approval, report, audit record, undo | Tested |
 | Merge by element, also as git merge driver | Tested with unit cases, with merge laws checked on random edits of both sides, and in real git repositories. Not yet tried on files written by a vendor tool |
 | Compare of DBC and ARXML files | Tested on synthetic files |
@@ -331,7 +331,7 @@ ecuh mcp                                   the server; started by the AI host
 ## Development
 
 ```
-python -m unittest discover -s tests       # 137 tests, about forty seconds; some need git
+python -m unittest discover -s tests       # 138 tests, about a minute; some need git
 python tools/build_pyz.py                  # dist/ecuh.pyz
 ```
 
