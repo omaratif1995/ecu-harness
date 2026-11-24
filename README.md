@@ -1,6 +1,9 @@
 # ECU Harness
 
 [![tests](https://github.com/omaratif1995/ecu-harness/actions/workflows/tests.yml/badge.svg)](https://github.com/omaratif1995/ecu-harness/actions/workflows/tests.yml)
+![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue)
+![Dependencies: none](https://img.shields.io/badge/dependencies-none-brightgreen)
+![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)
 
 An AI agent harness for AUTOSAR ECU configuration.
 
@@ -11,6 +14,19 @@ The point of a harness is that the exact work is done by code, not by the model.
 It works on Vector DaVinci Configurator Classic projects and on any other project that stores its ECU configuration as AUTOSAR ECUC ARXML.
 
 > Independent open-source project. Not affiliated with or endorsed by Vector Informatik GmbH or the AUTOSAR partnership. DaVinci and MICROSAR are trademarks of Vector Informatik GmbH; AUTOSAR is a trademark of the AUTOSAR partnership. The repository contains no vendor files, definitions or documentation.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    A["AI Host (VS Code / Copilot / MCP Client)"] -->|"MCP tools or CLI"| B["Policy, Approval & Audit Gate"]
+    B -->|"Type & range checks (BSWMD)"| C["Byte-Exact ARXML Engine"]
+    B -->|"Element-level 3-way merge"| D["Git Merge Driver"]
+    B -->|"Signal & container diff"| E["DBC / ARXML Comparator"]
+    C --> F["Snapshot, Re-Parse Proof & Rollback"]
+    F -->|"Baseline gate"| G["Review Report & audit.json"]
+    F -.->|"Optional approved task"| H["Vendor CLI Driver (Experimental)"]
+```
 
 ## What it covers
 
@@ -63,7 +79,7 @@ Then:
    - "The customer sent Input/Vehicle_v2.dbc. What changed compared with Input/Vehicle.dbc, and what does it affect?"
    - "Rename PDU Pdu_EngineData to Pdu_Engine."
 
-For a PC where only single files may be copied: `python tools/build_pyz.py` makes `dist/ecuh.pyz`, the whole harness in one file of about 125 kB that is used the same way (`python ecuh.pyz init`). A `pyproject.toml` is included for `pip install .`, which is not tested yet.
+For a PC where only single files may be copied: `python tools/build_pyz.py` makes `dist/ecuh.pyz`, the whole harness in one file of about 128 kB that is used the same way (`python ecuh.pyz init`). A `pyproject.toml` is also included for `pip install .` (installs the `ecuh` console script with zero third-party dependencies).
 
 ## Use it on your own project
 
